@@ -27,6 +27,44 @@ func TestSqlCommandParse(t *testing.T) {
 			}`,
 			exp: "INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);",
 		},
+		{
+			name: "update statement set operation",
+			input: `{
+				"op": "u",
+				"ns": "test.student",
+				"o": {
+					"$v": 2,
+					"diff": {
+						"u": {
+							"is_graduated": true
+						}
+					}	
+				},
+					"o2": {
+					"_id": "635b79e231d82a8ab1de863b"
+				}
+			}`,
+			exp: "UPDATE test.student SET is_graduated = true WHERE _id = '635b79e231d82a8ab1de863b';",
+		},
+		{
+			name: "update statement unset operation",
+			input: `{
+				"op": "u",
+				"ns": "test.student",
+				"o": {
+					"$v": 2,
+					"diff": {
+						"d": {
+							"roll_no": false
+						}
+					}
+				},
+				"o2": {
+					"_id": "635b79e231d82a8ab1de863b"
+				}
+			}`,
+			exp: "UPDATE test.student SET roll_no = NULL WHERE _id = '635b79e231d82a8ab1de863b';",
+		},
 	}
 
 	for _, tt := range tc {
