@@ -65,6 +65,17 @@ func TestSqlCommandParse(t *testing.T) {
 			}`,
 			exp: "UPDATE test.student SET roll_no = NULL WHERE _id = '635b79e231d82a8ab1de863b';",
 		},
+		{
+			name: "delete statement",
+			input: `{
+				"op": "d",
+				"ns": "test.student",
+				"o": {
+					"_id": "635b79e231d82a8ab1de863b"
+				}
+			}`,
+			exp: "DELETE FROM test.student WHERE _id = '635b79e231d82a8ab1de863b';",
+		},
 	}
 
 	for _, tt := range tc {

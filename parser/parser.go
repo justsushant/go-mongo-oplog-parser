@@ -13,9 +13,9 @@ type SqlCommand struct {
 	tableName string
 	keys []string
 	vals []string
-	setArr map[string]interface{}
-	unsetArr map[string]interface{}
-	condition map[string]interface{}
+	setMap map[string]interface{}
+	unsetMap map[string]interface{}
+	conditionMap map[string]interface{}
 }
 
 func(s *SqlCommand) String() string {
@@ -23,6 +23,8 @@ func(s *SqlCommand) String() string {
 		return fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s);", s.tableName, strings.Join(s.keys, ", "), strings.Join(s.vals, ", "))
 	} else if s.op == "u" {
 		return fmt.Sprintf("UPDATE %s SET %s WHERE %s;", s.tableName, s.getUpdateClause(), s.getConditionClause())
+	} else if s.op == "d" {
+		return fmt.Sprintf("DELETE FROM %s WHERE %s;", s.tableName, s.getConditionClause())
 	}
 
 	return ""
@@ -44,10 +46,8 @@ func(s *SqlCommand) Parse() (string, error) {
 }
 
 func (s *SqlCommand) setOperationType(result map[string]interface{}) {
-    if result["op"] == "i" {
-        s.op = "i"
-    } else if result["op"] == "u" {
-		s.op = "u"
+	if result["op"] == "i" || result["op"] == "u" || result["op"] == "d" {
+		s.op = result["op"].(string)
 	}
 }
 
@@ -62,7 +62,8 @@ func (s *SqlCommand) setKeysAndValues(result map[string]interface{}) {
    	if s.op == "i" {
 		s.keys = make([]string, 0, len(nestedMap))
 		s.vals = make([]string, 0, len(nestedMap))
-	
+		
+		// extracts the insert key and values
 		for key, val := range nestedMap {
 			s.keys = append(s.keys, key)
 			s.vals = append(s.vals, convertValueToString(val))
@@ -70,50 +71,59 @@ func (s *SqlCommand) setKeysAndValues(result map[string]interface{}) {
 	} else if s.op == "u" {
 		nestedMap = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
 
+		// extracts the update set key and value
 		if nestedMap["u"] != nil {
-			s.setArr = make(map[string]interface{})
+			s.setMap = make(map[string]interface{})
 			for key, val := range nestedMap["u"].(map[string]interface{}) {
-				s.setArr[key] = val
+				s.setMap[key] = val
 			}
 		}
 
+		// extracts the update unset key and value
 		if nestedMap["d"] != nil {
-			s.unsetArr = make(map[string]interface{})
+			s.unsetMap = make(map[string]interface{})
 			for key, val := range nestedMap["d"].(map[string]interface{}) {
-				s.unsetArr[key] = val
+				s.unsetMap[key] = val
 			}
 		}
 
+		// extracts the update condition
 		if result["o2"] != nil {
-			s.condition = make(map[string]interface{})
+			s.conditionMap = make(map[string]interface{})
 			for key, val := range result["o2"].(map[string]interface{}) {
-				s.condition[key] = val
+				s.conditionMap[key] = val
 			}
+		}
+	} else if s.op == "d" {
+		nestedMap = result["o"].(map[string]interface{})
+		s.conditionMap = make(map[string]interface{})
+		for key, val := range nestedMap {
+			s.conditionMap[key] = val
 		}
 	}
 }
 
 func (s *SqlCommand) getConditionClause() string {
-	conditionArr := make([]string, 0, len(s.condition))
-	for key, val := range s.condition {
-		conditionArr = append(conditionArr, fmt.Sprintf("%v = %v", key, convertValueToString(val)))
+	var conditionClause string
+	for key, val := range s.conditionMap {
+		conditionClause = fmt.Sprintf("%v = %v", key, convertValueToString(val))
 	}
 
-	return strings.Join(conditionArr, " AND ")
+	return conditionClause
 }
 
 func (s *SqlCommand) getUpdateClause() string {
-	updateArr := make([]string, 0, len(s.setArr) + len(s.unsetArr))
+	var updateClause string
 
-	for key, val := range s.setArr {
-		updateArr = append(updateArr, fmt.Sprintf("%v = %v", key, convertValueToString(val)))
+	for key, val := range s.setMap {
+		updateClause = fmt.Sprintf("%v = %v", key, convertValueToString(val))
 	}
 
-	for key := range s.unsetArr {
-		updateArr = append(updateArr, fmt.Sprintf("%s = NULL", key))
+	for key := range s.unsetMap {
+		updateClause = fmt.Sprintf("%s = NULL", key)
 	}
 
-	return strings.Join(updateArr, ", ")
+	return updateClause
 }
 
 func convertValueToString(val interface{}) string {
