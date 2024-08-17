@@ -2,40 +2,56 @@ package parser
 
 import (
 	"testing"
+
 	pgquery "github.com/pganalyze/pg_query_go/v5"
 )
 
-func TestParse(t *testing.T) {
-	input := `{
-		"op": "i",
-		"ns": "test.student",
-		"o": {
-			"_id": "635b79e231d82a8ab1de863b",
-			"name": "Selena Miller",
-			"roll_no": 51,
-			"is_graduated": false,
-			"date_of_birth": "2000-01-30"
-		}
-	}`
-
-	exp := "INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);"
-
-	got, err := Parse(input)
-	if err != nil {
-		t.Errorf("Error: %v", err)
+func TestSqlCommandParse(t *testing.T) {
+	tc := []struct {
+		name string
+		input string
+		exp string
+	}{
+		{
+			name: "insert statement",
+			input: `{
+				"op": "i",
+				"ns": "test.student",
+				"o": {
+					"_id": "635b79e231d82a8ab1de863b",
+					"name": "Selena Miller",
+					"roll_no": 51,
+					"is_graduated": false,
+					"date_of_birth": "2000-01-30"
+				}
+			}`,
+			exp: "INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);",
+		},
 	}
 
-	result, err := compareSqlStatement(t, exp, got)
-	if err != nil {
-		t.Fatalf("Error while comparing SQL statement: %v", err)
-	}
+	for _, tt := range tc {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &SqlCommand{rawOplog: tt.input}
+			
+			got, err := s.Parse()
+			if err != nil {
+				t.Errorf("Error: %v", err)
+			}
 
-	if !result {
-		t.Errorf("Expected %s but got %s", exp, got)
+			result, err := compareSqlStatement(t, tt.exp, got)
+			if err != nil {
+				t.Fatalf("Error while comparing SQL statements: %v", err)
+			}
+
+			if !result {
+				t.Errorf("Expected %q but got %q", tt.exp, got)
+			}
+		})
 	}
 }
 
 // compares if sql statements are equal on the basis of fingerprint
+// if they are equivalent, fingerprint will be same
 func compareSqlStatement(t *testing.T, expected, got string) (bool, error) {
 	t.Helper()
 
