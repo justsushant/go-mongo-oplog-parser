@@ -13,14 +13,15 @@ type MongoOplog struct {
 	op string
 	dbName string
 	tableName string
+	tableCols map[string]interface{}
 	keys []string
 	vals []string
-	valType map[string]interface{}
 	setMap map[string]interface{}
 	unsetMap map[string]interface{}
 	conditionMap map[string]interface{}
 	query []string
 	isSchemaCreated bool
+	isSchemaParsed bool
 }
 
 func NewMongoOplogParser(query string) *MongoOplog {
@@ -65,8 +66,6 @@ func(s *MongoOplog) Parse() (string, error) {
 func(s *MongoOplog) save() {
 	if s.op == "i" {
 		if !s.isSchemaCreated{
-			// sorting table columns to maintain consistency wrt testing
-			// slices.Sort(s.valType)
 			cols := s.getCreateTableValues()
 
 			createSchema := fmt.Sprintf("CREATE SCHEMA %s;", s.dbName)
@@ -103,20 +102,37 @@ func(s *MongoOplog) setTableName(result map[string]interface{}) {
     }
 }
 
+func(s *MongoOplog) getAlterTableStatement(key, val string) string {
+	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s %s;", s.dbName, s.tableName, key, val)
+}
+
 func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
     nestedMap := result["o"].(map[string]interface{})
-   	if s.op == "i" {
+
+	if !s.isSchemaParsed {
+		s.tableCols = make(map[string]interface{})
+		for key, val := range nestedMap {
+			s.tableCols[key] = s.getTableColType(key, val)
+		}
+		s.isSchemaParsed = true
+	}
+
+   	if s.op == "i" {	// on insert operation
 		s.keys = make([]string, 0, len(nestedMap))
 		s.vals = make([]string, 0, len(nestedMap))
-		s.valType = make(map[string]interface{})
 		
 		// extracts the insert key and values
 		for key, val := range nestedMap {
 			s.keys = append(s.keys, key)
 			s.vals = append(s.vals, s.convertValueToString(val))
-			s.valType[key] = s.createTableColumn(key, val)
+
+			// if key is not in table schema, add alter table statement
+			if _, ok := s.tableCols[key]; !ok {
+				s.tableCols[key] = s.getTableColType(key, val)
+				s.query = append(s.query, s.getAlterTableStatement(key, s.tableCols[key].(string)))
+			}
 		}
-	} else if s.op == "u" {
+	} else if s.op == "u" {		// on update operation
 		nestedMap = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
 
 		// extracts the update set key and value
@@ -142,7 +158,7 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 				s.conditionMap[key] = val
 			}
 		}
-	} else if s.op == "d" {
+	} else if s.op == "d" {		// on delete operation
 		nestedMap = result["o"].(map[string]interface{})
 		s.conditionMap = make(map[string]interface{})
 		for key, val := range nestedMap {
@@ -174,7 +190,7 @@ func(s *MongoOplog) getUpdateClause() string {
 	return updateClause
 }
 
-func(s *MongoOplog) createTableColumn(key string, val interface{}) string {
+func(s *MongoOplog) getTableColType(key string, val interface{}) string {
 	switch val.(type) {
 	case string:
 		// assuming _id is primary key
@@ -193,7 +209,7 @@ func(s *MongoOplog) createTableColumn(key string, val interface{}) string {
 
 func(s *MongoOplog) getCreateTableValues() []string {
 	var tableColumns []string
-	for key, val := range s.valType {
+	for key, val := range s.tableCols {
 		tableColumns = append(tableColumns, fmt.Sprintf("%v %v", key, val))
 	}
 
