@@ -1,12 +1,13 @@
 package parser
 
 import (
+	"fmt"
 	"testing"
 
 	pgquery "github.com/pganalyze/pg_query_go/v5"
 )
 
-func TestSqlCommandParse(t *testing.T) {
+func TestMongoOplogParser(t *testing.T) {
 	tc := []struct {
 		name string
 		input string
@@ -92,26 +93,68 @@ func TestSqlCommandParse(t *testing.T) {
 			exp: `
 				CREATE SCHEMA test;
 				CREATE TABLE test.student
-				  (
+				(
 					_id           VARCHAR(255) PRIMARY KEY,
 					date_of_birth VARCHAR(255),
 					is_graduated  BOOLEAN,
 					name          VARCHAR(255),
 					roll_no       FLOAT
-				  );
+				);
 				INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);
+			`,
+		},
+		{
+			name: "create table and multiple insert statement",
+			input: `[
+				{
+					"op": "i",
+					"ns": "test.student",
+					"o": {
+					"_id": "635b79e231d82a8ab1de863b",
+					"name": "Selena Miller",
+					"roll_no": 51,
+					"is_graduated": false,
+					"date_of_birth": "2000-01-30"
+					}
+				},
+				{
+					"op": "i",
+					"ns": "test.student",
+					"o": {
+					"_id": "14798c213f273a7ca2cf5174",
+					"name": "George Smith",
+					"roll_no": 21,
+					"is_graduated": true,
+					"date_of_birth": "2001-03-23"
+					}
+				}
+			]`,
+			exp: `
+				CREATE SCHEMA test;
+				CREATE TABLE test.student
+				(
+					_id           VARCHAR(255) PRIMARY KEY,
+					date_of_birth VARCHAR(255),
+					is_graduated  BOOLEAN,
+					name          VARCHAR(255),
+					roll_no       FLOAT
+				);
+				INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);
+				INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('14798c213f273a7ca2cf5174', '2001-03-23', true, 'George Smith', 21);
 			`,
 		},
 	}
 
 	for _, tt := range tc {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &SqlCommand{rawOplog: tt.input}
+			s := NewMongoOplogParser(tt.input)
 			
 			got, err := s.Parse()
 			if err != nil {
 				t.Errorf("Error: %v", err)
 			}
+
+			fmt.Println(got)
 
 			result, err := compareSqlStatement(t, tt.exp, got)
 			if err != nil {
