@@ -15,7 +15,7 @@ type MongoOplog struct {
 	tableName string
 	keys []string
 	vals []string
-	valType []string
+	valType map[string]interface{}
 	setMap map[string]interface{}
 	unsetMap map[string]interface{}
 	conditionMap map[string]interface{}
@@ -66,10 +66,11 @@ func(s *MongoOplog) save() {
 	if s.op == "i" {
 		if !s.isSchemaCreated{
 			// sorting table columns to maintain consistency wrt testing
-			slices.Sort(s.valType)
+			// slices.Sort(s.valType)
+			cols := s.getCreateTableValues()
 
 			createSchema := fmt.Sprintf("CREATE SCHEMA %s;", s.dbName)
-			createTable := fmt.Sprintf("CREATE TABLE %s.%s (%s);", s.dbName, s.tableName, strings.Join(s.valType, ", "))
+			createTable := fmt.Sprintf("CREATE TABLE %s.%s (%s);", s.dbName, s.tableName, strings.Join(cols, ", "))
 
 			s.query = append(s.query, createSchema)
 			s.query = append(s.query, createTable)
@@ -107,13 +108,13 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
    	if s.op == "i" {
 		s.keys = make([]string, 0, len(nestedMap))
 		s.vals = make([]string, 0, len(nestedMap))
-		s.valType = make([]string, 0, len(nestedMap))
+		s.valType = make(map[string]interface{})
 		
 		// extracts the insert key and values
 		for key, val := range nestedMap {
 			s.keys = append(s.keys, key)
 			s.vals = append(s.vals, s.convertValueToString(val))
-			s.valType = append(s.valType, s.createTableColumn(key, val))
+			s.valType[key] = s.createTableColumn(key, val)
 		}
 	} else if s.op == "u" {
 		nestedMap = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
@@ -178,16 +179,28 @@ func(s *MongoOplog) createTableColumn(key string, val interface{}) string {
 	case string:
 		// assuming _id is primary key
 		if key == "_id" {
-			return key + " VARCHAR(255) PRIMARY KEY"
+			return " VARCHAR(255) PRIMARY KEY"
 		}
-		return key + " VARCHAR(255)"
+		return " VARCHAR(255)"
 	case float64:
-		return key + " FLOAT"
+		return " FLOAT"
 	case bool:
-		return key + " BOOLEAN"
+		return " BOOLEAN"
 	default:
 		return ""
 	}
+}
+
+func(s *MongoOplog) getCreateTableValues() []string {
+	var tableColumns []string
+	for key, val := range s.valType {
+		tableColumns = append(tableColumns, fmt.Sprintf("%v %v", key, val))
+	}
+
+	// sorting table columns to maintain consistency wrt testing
+	slices.Sort(tableColumns)
+
+	return tableColumns
 }
 
 func(s *MongoOplog) convertValueToString(val interface{}) string {
