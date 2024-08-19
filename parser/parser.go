@@ -13,13 +13,13 @@ type MongoOplog struct {
 	op string
 	dbName string
 	tableName string
-	tableCols map[string]interface{}
-	keys []string
-	vals []string
-	setMap map[string]interface{}
-	unsetMap map[string]interface{}
-	conditionMap map[string]interface{}
-	query []string
+	tableCols map[string]string			// holds the table columns schema
+	keys []string						// keys for insert operation
+	vals []string						// values for insert operation
+	setMap map[string]string			// key-val for update set operation
+	unsetMap map[string]string			// key-val for update unset operation
+	conditionMap map[string]string		// key-val for condition clause
+	query []string						// holds the final sql query
 	isSchemaCreated bool
 	isSchemaParsed bool
 }
@@ -41,7 +41,7 @@ func(s *MongoOplog) Parse() (string, error) {
 		return "", err
 	}
 
-	// to handle both, slice of json and single json
+	// to handle both type, slice of json and single json
 	switch o := obj.(type) {
 	case []interface{}:
 		for _, item := range o {
@@ -110,7 +110,7 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
     nestedMap := result["o"].(map[string]interface{})
 
 	if !s.isSchemaParsed {
-		s.tableCols = make(map[string]interface{})
+		s.tableCols = make(map[string]string)
 		for key, val := range nestedMap {
 			s.tableCols[key] = s.getTableColType(key, val)
 		}
@@ -123,13 +123,20 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 		
 		// extracts the insert key and values
 		for key, val := range nestedMap {
+			// if key is nested obj
+			// if key.(type) == []interface{} {
+				
+			// }
+
+
+			// adding key and value for query generation
 			s.keys = append(s.keys, key)
 			s.vals = append(s.vals, s.convertValueToString(val))
 
 			// if key is not in table schema, add alter table statement
 			if _, ok := s.tableCols[key]; !ok {
 				s.tableCols[key] = s.getTableColType(key, val)
-				s.query = append(s.query, s.getAlterTableStatement(key, s.tableCols[key].(string)))
+				s.query = append(s.query, s.getAlterTableStatement(key, s.tableCols[key]))
 			}
 		}
 	} else if s.op == "u" {		// on update operation
@@ -137,50 +144,52 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 
 		// extracts the update set key and value
 		if nestedMap["u"] != nil {
-			s.setMap = make(map[string]interface{})
+			s.setMap = make(map[string]string)
 			for key, val := range nestedMap["u"].(map[string]interface{}) {
-				s.setMap[key] = val
+				s.setMap[key] = s.convertValueToString(val)
 			}
 		}
 
 		// extracts the update unset key and value
 		if nestedMap["d"] != nil {
-			s.unsetMap = make(map[string]interface{})
+			s.unsetMap = make(map[string]string)
 			for key, val := range nestedMap["d"].(map[string]interface{}) {
-				s.unsetMap[key] = val
+				s.unsetMap[key] = s.convertValueToString(val)
 			}
 		}
 
 		// extracts the update condition
 		if result["o2"] != nil {
-			s.conditionMap = make(map[string]interface{})
+			s.conditionMap = make(map[string]string)
 			for key, val := range result["o2"].(map[string]interface{}) {
-				s.conditionMap[key] = val
+				s.conditionMap[key] = s.convertValueToString(val)
 			}
 		}
 	} else if s.op == "d" {		// on delete operation
 		nestedMap = result["o"].(map[string]interface{})
-		s.conditionMap = make(map[string]interface{})
+		s.conditionMap = make(map[string]string)
 		for key, val := range nestedMap {
-			s.conditionMap[key] = val
+			s.conditionMap[key] = s.convertValueToString(val)
 		}
 	}
 }
 
+// need to join with AND if multiple conditions are present
 func(s *MongoOplog) getConditionClause() string {
 	var conditionClause string
 	for key, val := range s.conditionMap {
-		conditionClause = fmt.Sprintf("%v = %v", key, s.convertValueToString(val))
+		conditionClause = fmt.Sprintf("%v = %v", key, val)
 	}
 
 	return conditionClause
 }
 
+// need to join with AND if multiple conditions are present
 func(s *MongoOplog) getUpdateClause() string {
 	var updateClause string
 
 	for key, val := range s.setMap {
-		updateClause = fmt.Sprintf("%v = %v", key, s.convertValueToString(val))
+		updateClause = fmt.Sprintf("%v = %v", key, val)
 	}
 
 	for key := range s.unsetMap {
