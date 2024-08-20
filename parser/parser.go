@@ -7,7 +7,11 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"go.mongodb.org/mongo-driver/bson/primitive"
 )
+
+var idKey = "_id"
 
 type MongoOplog struct {
 	rawOplog string
@@ -23,10 +27,16 @@ type MongoOplog struct {
 	query []string						// holds the final sql query
 	isSchemaCreated bool
 	isSchemaParsed bool
+	genUuid func()string
 }
 
 func NewMongoOplogParser(query string) *MongoOplog {
-	return &MongoOplog{rawOplog: query}
+	return &MongoOplog{
+		rawOplog: query,
+		genUuid: func() string {
+			return primitive.NewObjectID().Hex()
+		},
+	}
 }
 
 func(s *MongoOplog) GetEquivalentSQL() (string, error) {
@@ -62,7 +72,62 @@ func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 		}
 
 		s.setKeysAndValues(r)
-		s.save()		
+		s.save()
+
+		// if r has nested objects and has _id key, then proceed further
+		nestedMap, ok := r["o"].(map[string]interface{})
+		if !ok {
+			continue
+		}
+		if _, ok := nestedMap[idKey]; !ok {
+			continue
+		}
+
+		// preparing parent object key and value
+		parentObjVal := nestedMap[idKey].(string)
+		parentObjKey := s.tableName + "_" + idKey
+
+		// handling nested objects separetly for create table and insert statement
+		// to maintain consistency wrt testing
+		for key, val := range nestedMap {
+			if reflect.TypeOf(val).Kind() == reflect.Slice {
+				// for create table statement
+				createStmt, err := s.getForeignTableCreateStatement(val, key, parentObjKey, parentObjVal)
+				if err != nil {
+					fmt.Println(err)
+					break
+				}
+				s.query = append(s.query, createStmt)
+				
+				// for insert statement
+				insertStmt, err := s.getForeignTableInsertStatement(val, key, parentObjKey, parentObjVal)
+				if err != nil {
+					fmt.Println(err)
+					break
+				}
+				s.query = append(s.query, insertStmt...)
+			}
+		}
+
+		for key, val := range nestedMap {
+			if reflect.TypeOf(val).Kind() == reflect.Map {
+				// for create table statement
+				createStmt, err := s.getForeignTableCreateStatement(val, key, parentObjKey, parentObjVal)
+				if err != nil {
+					fmt.Println(err)
+					break
+				}
+				s.query = append(s.query, createStmt)
+
+				// for insert statement
+				insertStmt, err := s.getForeignTableInsertStatement(val, key, parentObjKey, parentObjVal)
+				if err != nil {
+					fmt.Println(err)
+					break
+				}
+				s.query = append(s.query, insertStmt...)
+			}
+		}
 	}
 	
 	return strings.Join(s.query, ""), nil
@@ -93,6 +158,11 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 	if !s.isSchemaParsed {
 		s.tableCols = make(map[string]string)
 		for key, val := range nestedMap {
+			// skip if value is map or slice
+			if reflect.TypeOf(val).Kind() == reflect.Map || reflect.TypeOf(val).Kind() == reflect.Slice {
+				continue
+			}
+
 			s.tableCols[key] = s.getTableColType(key, val)
 		}
 		s.isSchemaParsed = true
@@ -104,6 +174,11 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 		
 		// extracts the insert key and values
 		for key, val := range nestedMap {
+			// skip if value is map or slice
+			if reflect.TypeOf(val).Kind() == reflect.Map || reflect.TypeOf(val).Kind() == reflect.Slice {
+				continue
+			}
+			
 			// adding key and value for query generation
 			s.keys = append(s.keys, key)
 			s.vals = append(s.vals, s.convertValueToString(val))
@@ -172,6 +247,68 @@ func(s *MongoOplog) save() {
 	} else if s.op == "d" {
 		s.query = append(s.query, fmt.Sprintf("DELETE FROM %s.%s WHERE %s;", s.dbName, s.tableName, s.getConditionClause()))
 	}
+}
+
+func(s *MongoOplog) getForeignTableCreateStatement(data interface{}, fTableName, parentObjKey, parentObjVal string) (string, error) {
+	var tableCols = make(map[string]string)
+
+	// saving two id columns first
+	tableCols[idKey] = s.getTableColType(idKey, s.convertValueToString(s.genUuid()))
+	tableCols[parentObjKey] = s.getTableColType(parentObjKey, s.convertValueToString(parentObjVal))
+
+	// if data is slice
+	if reflect.TypeOf(data).Kind() == reflect.Slice {
+		for key, val := range data.([]interface{})[0].(map[string]interface{}) {
+			tableCols[key] = s.getTableColType(key, val.(string))
+		}
+	}
+
+	// if data is map
+	if reflect.TypeOf(data).Kind() == reflect.Map {
+		for key, val := range data.(map[string]interface{}) {
+			tableCols[key] = s.getTableColType(key, val.(string))
+		}
+	}
+
+	cols := s.getCreateTableValues(tableCols)
+	slices.Sort(cols)	// sorting table columns to maintain consistency wrt testing
+
+	if len(cols) == 0 {
+		return "", fmt.Errorf("no columns to create %s table", fTableName)
+	}
+
+	createTable := fmt.Sprintf("CREATE TABLE %s.%s_%s (%s);", s.dbName, s.tableName, fTableName, strings.Join(cols, ", "))
+	return createTable, nil
+}
+
+func(s *MongoOplog) getForeignTableInsertStatement(data interface{}, fTableName, parentObjKey, parentObjVal string) ([]string, error) {
+	queries := []string{}
+	keysArr := []string{idKey, parentObjKey}
+	valsArr := []string{s.convertValueToString(s.genUuid()), s.convertValueToString(parentObjVal)}
+
+	// if data is slice
+	if reflect.TypeOf(data).Kind() == reflect.Slice {
+		for _, v := range data.([]interface{}) {
+			for k, v := range v.(map[string]interface{}) {
+				keysArr = append(keysArr, k)
+				valsArr = append(valsArr, s.convertValueToString(v))
+			}
+	
+			queries = append(queries, fmt.Sprintf("INSERT INTO %s.%s_%s (%s) VALUES (%s);", s.dbName, s.tableName, fTableName, strings.Join(keysArr, ", "), strings.Join(valsArr, ", ")))
+		}
+	}
+
+	// if data is map
+	if reflect.TypeOf(data).Kind() == reflect.Map {
+		for k, v := range data.(map[string]interface{}) {
+			keysArr = append(keysArr, k)
+			valsArr = append(valsArr, s.convertValueToString(v))
+		}
+
+		queries = append(queries, fmt.Sprintf("INSERT INTO %s.%s_%s (%s) VALUES (%s);", s.dbName, s.tableName, fTableName, strings.Join(keysArr, ", "), strings.Join(valsArr, ", ")))
+	}
+
+	return queries, nil
 }
 
 
