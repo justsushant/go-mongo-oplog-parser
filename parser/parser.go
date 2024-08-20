@@ -3,6 +3,7 @@ package parser
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -28,11 +29,7 @@ func NewMongoOplogParser(query string) *MongoOplog {
 	return &MongoOplog{rawOplog: query}
 }
 
-func(s *MongoOplog) String() string {
-	return strings.Join(s.query, "")
-}
-
-func(s *MongoOplog) Parse() (string, error) {
+func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 	var result []map[string]interface{}
 	var obj interface{}
 
@@ -42,73 +39,57 @@ func(s *MongoOplog) Parse() (string, error) {
 	}
 
 	// to handle both type, slice of json and single json
-	switch o := obj.(type) {
-	case []interface{}:
-		for _, item := range o {
+	switch reflect.TypeOf(obj).Kind() {
+	case reflect.Slice:
+		for _, item := range obj.([]interface{}) {
             if obj, ok := item.(map[string]interface{}); ok {
                 result = append(result, obj)
             }
         }
-	case map[string]interface{}:
-		result = append(result, o)
+	case reflect.Map:
+		result = append(result, obj.(map[string]interface{}))
 	}
 
 	for _, r := range result {
-		s.setOperationType(r)
-		s.setTableName(r)
+		err := s.setOperationType(r)
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		err = s.setTableName(r)
+		if err != nil {
+			fmt.Println(err)
+		}
+
 		s.setKeysAndValues(r)
-		s.save()
+		s.save()		
 	}
 	
-	return s.String(), nil
+	return strings.Join(s.query, ""), nil
 }
 
-func(s *MongoOplog) save() {
-	if s.op == "i" {
-		if !s.isSchemaCreated{
-			cols := s.getCreateTableValues()
-
-			createSchema := fmt.Sprintf("CREATE SCHEMA %s;", s.dbName)
-			createTable := fmt.Sprintf("CREATE TABLE %s.%s (%s);", s.dbName, s.tableName, strings.Join(cols, ", "))
-
-			s.query = append(s.query, createSchema)
-			s.query = append(s.query, createTable)
-			s.isSchemaCreated = true
-		}
-
-		if len(s.keys) != len(s.vals) {
-			panic("keys and values length mismatch")
-		}
-
-		insertQuery := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s);", s.dbName, s.tableName, strings.Join(s.keys, ", "), strings.Join(s.vals, ", "))
-		s.query = append(s.query, insertQuery)
-	} else if s.op == "u" {
-		s.query = append(s.query, fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s;", s.dbName, s.tableName, s.getUpdateClause(), s.getConditionClause()))
-	} else if s.op == "d" {
-		s.query = append(s.query, fmt.Sprintf("DELETE FROM %s.%s WHERE %s;", s.dbName, s.tableName, s.getConditionClause()))
-	}
-}
-
-func(s *MongoOplog) setOperationType(result map[string]interface{}) {
+func(s *MongoOplog) setOperationType(result map[string]interface{}) error {
 	if result["op"] == "i" || result["op"] == "u" || result["op"] == "d" {
 		s.op = result["op"].(string)
+		return nil
 	}
+	return fmt.Errorf("error: unsupported operation type %q", result["op"])
 }
 
-func(s *MongoOplog) setTableName(result map[string]interface{}) {
+func(s *MongoOplog) setTableName(result map[string]interface{}) error {
     if result["ns"] != nil {
         s.dbName = strings.Split(result["ns"].(string), ".")[0]
 		s.tableName = strings.Split(result["ns"].(string), ".")[1]
+		return nil
     }
-}
-
-func(s *MongoOplog) getAlterTableStatement(key, val string) string {
-	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s %s;", s.dbName, s.tableName, key, val)
+	return fmt.Errorf("error: ns key not found in the oplog: failed to set the table name")
 }
 
 func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
     nestedMap := result["o"].(map[string]interface{})
 
+	// parsing the schema only once
+	// if any new key is found, alter table statement is added atm of handling insert operation
 	if !s.isSchemaParsed {
 		s.tableCols = make(map[string]string)
 		for key, val := range nestedMap {
@@ -123,12 +104,6 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 		
 		// extracts the insert key and values
 		for key, val := range nestedMap {
-			// if key is nested obj
-			// if key.(type) == []interface{} {
-				
-			// }
-
-
 			// adding key and value for query generation
 			s.keys = append(s.keys, key)
 			s.vals = append(s.vals, s.convertValueToString(val))
@@ -166,12 +141,42 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 			}
 		}
 	} else if s.op == "d" {		// on delete operation
-		nestedMap = result["o"].(map[string]interface{})
 		s.conditionMap = make(map[string]string)
 		for key, val := range nestedMap {
 			s.conditionMap[key] = s.convertValueToString(val)
 		}
 	}
+}
+
+func(s *MongoOplog) save() {
+	if s.op == "i" {
+		if !s.isSchemaCreated{
+			cols := s.getCreateTableValues(s.tableCols)
+
+			createSchema := fmt.Sprintf("CREATE SCHEMA %s;", s.dbName)
+			createTable := fmt.Sprintf("CREATE TABLE %s.%s (%s);", s.dbName, s.tableName, strings.Join(cols, ", "))
+
+			s.query = append(s.query, createSchema)
+			s.query = append(s.query, createTable)
+			s.isSchemaCreated = true
+		}
+
+		if len(s.keys) != len(s.vals) {
+			panic("keys and values length mismatch")
+		}
+
+		insertQuery := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s);", s.dbName, s.tableName, strings.Join(s.keys, ", "), strings.Join(s.vals, ", "))
+		s.query = append(s.query, insertQuery)
+	} else if s.op == "u" {
+		s.query = append(s.query, fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s;", s.dbName, s.tableName, s.getUpdateClause(), s.getConditionClause()))
+	} else if s.op == "d" {
+		s.query = append(s.query, fmt.Sprintf("DELETE FROM %s.%s WHERE %s;", s.dbName, s.tableName, s.getConditionClause()))
+	}
+}
+
+
+func(s *MongoOplog) getAlterTableStatement(key, val string) string {
+	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s %s;", s.dbName, s.tableName, key, val)
 }
 
 // need to join with AND if multiple conditions are present
@@ -192,6 +197,7 @@ func(s *MongoOplog) getUpdateClause() string {
 		updateClause = fmt.Sprintf("%v = %v", key, val)
 	}
 
+	// unset operation value set to NULL according to problem statement
 	for key := range s.unsetMap {
 		updateClause = fmt.Sprintf("%s = NULL", key)
 	}
@@ -199,26 +205,9 @@ func(s *MongoOplog) getUpdateClause() string {
 	return updateClause
 }
 
-func(s *MongoOplog) getTableColType(key string, val interface{}) string {
-	switch val.(type) {
-	case string:
-		// assuming _id is primary key
-		if key == "_id" {
-			return " VARCHAR(255) PRIMARY KEY"
-		}
-		return " VARCHAR(255)"
-	case float64:
-		return " FLOAT"
-	case bool:
-		return " BOOLEAN"
-	default:
-		return ""
-	}
-}
-
-func(s *MongoOplog) getCreateTableValues() []string {
+func(s *MongoOplog) getCreateTableValues(tableCols map[string]string) []string {
 	var tableColumns []string
-	for key, val := range s.tableCols {
+	for key, val := range tableCols {
 		tableColumns = append(tableColumns, fmt.Sprintf("%v %v", key, val))
 	}
 
@@ -228,20 +217,33 @@ func(s *MongoOplog) getCreateTableValues() []string {
 	return tableColumns
 }
 
+func(s *MongoOplog) getTableColType(key string, val interface{}) string {
+	switch reflect.TypeOf(val).Kind() {
+	case reflect.String:
+		if key == "_id" {		// assuming _id is primary key
+			return " VARCHAR(255) PRIMARY KEY"
+		}
+		return " VARCHAR(255)"
+	case reflect.Float64:
+		return " FLOAT"
+	case reflect.Bool:
+		return " BOOLEAN"
+	default:
+		return ""
+	}
+}
+
 func(s *MongoOplog) convertValueToString(val interface{}) string {
 	// json unmarshalling converts all numbers to float64
-    switch v := val.(type) {
-    case string:
-        return "'" + v + "'"
-    case float64:
-		// number is int
-        if v == float64(int(v)) {
-            return strconv.Itoa(int(v))
-        }
-		// number is float
-        return strconv.FormatFloat(v, 'f', -1, 64)
-    case bool:
-        return strconv.FormatBool(v)
+    switch reflect.TypeOf(val).Kind() {
+    case reflect.String:
+        return "'" + val.(string) + "'"
+	case reflect.Int:
+			return strconv.Itoa(int(val.(int)))
+    case reflect.Float64:
+        return strconv.FormatFloat(val.(float64), 'f', -1, 64)
+    case reflect.Bool:
+        return strconv.FormatBool(val.(bool))
     default:
         return ""
     }

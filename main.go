@@ -32,7 +32,7 @@ func main() {
 		}
 	]`;
 	oplog := parser.NewMongoOplogParser(query)
-	if comm, err := oplog.Parse(); err != nil {
+	if comm, err := oplog.GetEquivalentSQL(); err != nil {
 		fmt.Println(err)
 	} else {
 		fmt.Println(comm)
