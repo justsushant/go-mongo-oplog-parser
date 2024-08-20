@@ -40,15 +40,15 @@ func NewMongoOplogParser(query string) *MongoOplog {
 }
 
 func(s *MongoOplog) GetEquivalentSQL() (string, error) {
-	var result []map[string]interface{}
+	// unmarshalling the raw oplog
 	var obj interface{}
-
 	err := json.Unmarshal([]byte(s.rawOplog), &obj)
 	if err != nil {
 		return "", err
 	}
 
 	// to handle both type, slice of json and single json
+	var result []map[string]interface{}
 	switch reflect.TypeOf(obj).Kind() {
 	case reflect.Slice:
 		for _, item := range obj.([]interface{}) {
@@ -60,6 +60,7 @@ func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 		result = append(result, obj.(map[string]interface{}))
 	}
 
+	// parsing the raw oplog
 	for _, r := range result {
 		err := s.setOperationType(r)
 		if err != nil {
@@ -71,8 +72,15 @@ func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 			fmt.Println(err)
 		}
 
-		s.setKeysAndValues(r)
-		s.save()
+		err = s.setKeysAndValues(r)
+		if err != nil {
+			fmt.Println(err)
+		}
+
+		err = s.save()
+		if err != nil {
+			fmt.Println(err)
+		}
 
 		// if r has nested objects and has _id key, then proceed further
 		nestedMap, ok := r["o"].(map[string]interface{})
@@ -129,6 +137,8 @@ func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 			}
 		}
 	}
+
+	// maybe we need to reset a lot of fields here like setMap, unsetMap, conditionMap, etc
 	
 	return strings.Join(s.query, ""), nil
 }
@@ -150,8 +160,11 @@ func(s *MongoOplog) setTableName(result map[string]interface{}) error {
 	return fmt.Errorf("error: ns key not found in the oplog: failed to set the table name")
 }
 
-func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
-    nestedMap := result["o"].(map[string]interface{})
+func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) error {
+    nestedMap, ok := result["o"].(map[string]interface{})
+	if !ok {
+		return fmt.Errorf("error: o key not found in the oplog: failed to set keys and values")
+	}
 
 	// parsing the schema only once
 	// if any new key is found, alter table statement is added atm of handling insert operation
@@ -178,19 +191,22 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 			if reflect.TypeOf(val).Kind() == reflect.Map || reflect.TypeOf(val).Kind() == reflect.Slice {
 				continue
 			}
-			
-			// adding key and value for query generation
-			s.keys = append(s.keys, key)
-			s.vals = append(s.vals, s.convertValueToString(val))
 
 			// if key is not in table schema, add alter table statement
 			if _, ok := s.tableCols[key]; !ok {
 				s.tableCols[key] = s.getTableColType(key, val)
 				s.query = append(s.query, s.getAlterTableStatement(key, s.tableCols[key]))
 			}
+
+			// adding key and value for query generation
+			s.keys = append(s.keys, key)
+			s.vals = append(s.vals, s.convertValueToString(val))
 		}
 	} else if s.op == "u" {		// on update operation
-		nestedMap = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
+		nestedMap, ok = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("error: diff key not found in the oplog: failed to set keys and values")
+		}
 
 		// extracts the update set key and value
 		if nestedMap["u"] != nil {
@@ -221,9 +237,10 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) {
 			s.conditionMap[key] = s.convertValueToString(val)
 		}
 	}
+	return nil
 }
 
-func(s *MongoOplog) save() {
+func(s *MongoOplog) save() error {
 	if s.op == "i" {
 		if !s.isSchemaCreated{
 			cols := s.getCreateTableValues(s.tableCols)
@@ -237,16 +254,33 @@ func(s *MongoOplog) save() {
 		}
 
 		if len(s.keys) != len(s.vals) {
-			panic("keys and values length mismatch")
+			return fmt.Errorf("error: keys and values length mismatch while inserting")
 		}
 
 		insertQuery := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s);", s.dbName, s.tableName, strings.Join(s.keys, ", "), strings.Join(s.vals, ", "))
 		s.query = append(s.query, insertQuery)
 	} else if s.op == "u" {
-		s.query = append(s.query, fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s;", s.dbName, s.tableName, s.getUpdateClause(), s.getConditionClause()))
+		updateClause := s.getUpdateClause()
+		if updateClause == "" {
+			return fmt.Errorf("error: update clause not found while updating")
+		}
+
+		conditionClause := s.getConditionClause()
+		if conditionClause == "" {
+			return fmt.Errorf("error: condition clause not found while updating")
+		}
+
+		s.query = append(s.query, fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s;", s.dbName, s.tableName, updateClause, conditionClause))
 	} else if s.op == "d" {
-		s.query = append(s.query, fmt.Sprintf("DELETE FROM %s.%s WHERE %s;", s.dbName, s.tableName, s.getConditionClause()))
+		conditionClause := s.getConditionClause()
+		if conditionClause == "" {
+			return fmt.Errorf("error: condition clause not found while deleting")
+		}
+
+		s.query = append(s.query, fmt.Sprintf("DELETE FROM %s.%s WHERE %s;", s.dbName, s.tableName, conditionClause))
 	}
+
+	return nil
 }
 
 func(s *MongoOplog) getForeignTableCreateStatement(data interface{}, fTableName, parentObjKey, parentObjVal string) (string, error) {
@@ -289,28 +323,31 @@ func(s *MongoOplog) getForeignTableInsertStatement(data interface{}, fTableName,
 	// if data is slice
 	if reflect.TypeOf(data).Kind() == reflect.Slice {
 		for _, v := range data.([]interface{}) {
-			for k, v := range v.(map[string]interface{}) {
-				keysArr = append(keysArr, k)
-				valsArr = append(valsArr, s.convertValueToString(v))
-			}
-	
-			queries = append(queries, fmt.Sprintf("INSERT INTO %s.%s_%s (%s) VALUES (%s);", s.dbName, s.tableName, fTableName, strings.Join(keysArr, ", "), strings.Join(valsArr, ", ")))
+			qs := s.craftForeignTableInsertStatement(v.(map[string]interface{}), fTableName, keysArr, valsArr)
+			queries = append(queries, qs...)
 		}
 	}
 
 	// if data is map
 	if reflect.TypeOf(data).Kind() == reflect.Map {
-		for k, v := range data.(map[string]interface{}) {
-			keysArr = append(keysArr, k)
-			valsArr = append(valsArr, s.convertValueToString(v))
-		}
-
-		queries = append(queries, fmt.Sprintf("INSERT INTO %s.%s_%s (%s) VALUES (%s);", s.dbName, s.tableName, fTableName, strings.Join(keysArr, ", "), strings.Join(valsArr, ", ")))
+		qs := s.craftForeignTableInsertStatement(data.(map[string]interface{}), fTableName, keysArr, valsArr)
+		queries = append(queries, qs...)
 	}
 
 	return queries, nil
 }
 
+// crafts insert statements according to data
+func(s *MongoOplog) craftForeignTableInsertStatement(data map[string]interface{}, fTableName string, keysArr, valsArr []string) []string {
+	queries := []string{}
+	for k, v := range data {
+		keysArr = append(keysArr, k)
+		valsArr = append(valsArr, s.convertValueToString(v))
+	}
+
+	queries = append(queries, fmt.Sprintf("INSERT INTO %s.%s_%s (%s) VALUES (%s);", s.dbName, s.tableName, fTableName, strings.Join(keysArr, ", "), strings.Join(valsArr, ", ")))
+	return queries
+}
 
 func(s *MongoOplog) getAlterTableStatement(key, val string) string {
 	return fmt.Sprintf("ALTER TABLE %s.%s ADD %s %s;", s.dbName, s.tableName, key, val)

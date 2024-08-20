@@ -12,21 +12,32 @@ func TestMongoOplogParser(t *testing.T) {
 		input string
 		exp string
 	}{
-		// {
-		// 	name: "insert statement",
-		// 	input: `{
-		// 		"op": "i",
-		// 		"ns": "test.student",
-		// 		"o": {
-		// 			"_id": "635b79e231d82a8ab1de863b",
-		// 			"name": "Selena Miller",
-		// 			"roll_no": 51,
-		// 			"is_graduated": false,
-		// 			"date_of_birth": "2000-01-30"
-		// 		}
-		// 	}`,
-		// 	exp: "INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);",
-		// },
+		{
+			name: "create table with insert statement",
+			input: `{
+				"op": "i",
+				"ns": "test.student",
+				"o": {
+					"_id": "635b79e231d82a8ab1de863b",
+					"name": "Selena Miller",
+					"roll_no": 51,
+					"is_graduated": false,
+					"date_of_birth": "2000-01-30"
+				}
+			}`,
+			exp: `
+				CREATE SCHEMA test;
+				CREATE TABLE test.student
+				(
+					_id           VARCHAR(255) PRIMARY KEY,
+					date_of_birth VARCHAR(255),
+					is_graduated  BOOLEAN,
+					name          VARCHAR(255),
+					roll_no       FLOAT
+				);
+				INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);
+			`,
+		},
 		{
 			name: "update statement set operation",
 			input: `{
@@ -75,32 +86,6 @@ func TestMongoOplogParser(t *testing.T) {
 				}
 			}`,
 			exp: "DELETE FROM test.student WHERE _id = '635b79e231d82a8ab1de863b';",
-		},
-		{
-			name: "create table with insert statement",
-			input: `{
-				"op": "i",
-				"ns": "test.student",
-				"o": {
-					"_id": "635b79e231d82a8ab1de863b",
-					"name": "Selena Miller",
-					"roll_no": 51,
-					"is_graduated": false,
-					"date_of_birth": "2000-01-30"
-				}
-			}`,
-			exp: `
-				CREATE SCHEMA test;
-				CREATE TABLE test.student
-				(
-					_id           VARCHAR(255) PRIMARY KEY,
-					date_of_birth VARCHAR(255),
-					is_graduated  BOOLEAN,
-					name          VARCHAR(255),
-					roll_no       FLOAT
-				);
-				INSERT INTO test.student (_id, date_of_birth, is_graduated, name, roll_no) VALUES ('635b79e231d82a8ab1de863b', '2000-01-30', false, 'Selena Miller', 51);
-			`,
 		},
 		{
 			name: "create table with multiple insert statement",
