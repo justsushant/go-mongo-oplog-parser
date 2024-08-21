@@ -1,0 +1,48 @@
+{
+    "op": "i",
+    "ns": "test.student",
+    "o": {
+        "_id": "635b79e231d82a8ab1de863b",
+        "name": "Selena Miller",
+        "roll_no": 51,
+        "is_graduated": false,
+        "date_of_birth": "2000-01-30"
+    }
+}
+{
+    "op": "u",
+    "ns": "test.student",
+    "o": {
+        "$v": 2,
+        "diff": {
+            "u": {
+                "is_graduated": true
+            }
+        }	
+    },
+        "o2": {
+        "_id": "635b79e231d82a8ab1de863b"
+    }
+}
+{
+    "op": "u",
+    "ns": "test.student",
+    "o": {
+        "$v": 2,
+        "diff": {
+            "d": {
+                "roll_no": false
+            }
+        }
+    },
+    "o2": {
+        "_id": "635b79e231d82a8ab1de863b"
+    }
+}
+{
+    "op": "d",
+    "ns": "test.student",
+    "o": {
+        "_id": "635b79e231d82a8ab1de863b"
+    }
+}
