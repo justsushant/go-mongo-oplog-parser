@@ -35,8 +35,8 @@ func Read(inputFile, outputFile string) error {
         }
 
         
-        m := parser.NewMongoOplogParser(string(obj))
-        sqlStmt, err := m.GetEquivalentSQL()
+        m := parser.NewMongoOplogParser()
+        sqlStmt, err := m.GetEquivalentSQL(string(obj))
         if err != nil {
             return fmt.Errorf("error while getting equivalent sql: %v", err)
         }

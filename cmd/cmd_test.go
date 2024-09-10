@@ -1,7 +1,6 @@
 package reader
 
 import (
-	"fmt"
 	"os"
 	"testing"
 
@@ -35,8 +34,6 @@ func TestRead(t *testing.T) {
 	
 	data, err := os.ReadFile(outputFile)
 	got := string(data)
-
-	fmt.Println(got)
 	
 	result, err := compareSqlStatement(t, exp, got)
 	if err != nil {

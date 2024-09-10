@@ -13,6 +13,11 @@ import (
 
 var idKey = "_id"
 
+type MongoOplogParser struct {
+	cache map[string]map[string]string
+	genUuid func()string
+}
+
 type MongoOplog struct {
 	rawOplog string
 	op string
@@ -28,18 +33,24 @@ type MongoOplog struct {
 	isSchemaCreated bool
 	isSchemaParsed bool
 	genUuid func()string
+	cache *map[string]map[string]string
 }
 
-func NewMongoOplogParser(query string) *MongoOplog {
-	return &MongoOplog{
-		rawOplog: query,
+func NewMongoOplogParser() *MongoOplogParser {
+	return &MongoOplogParser{
 		genUuid: func() string {
 			return primitive.NewObjectID().Hex()
 		},
 	}
 }
 
-func(s *MongoOplog) GetEquivalentSQL() (string, error) {
+func(m *MongoOplogParser) GetEquivalentSQL(rawOplog string) (string, error) {
+	s := &MongoOplog{
+		rawOplog: rawOplog,
+		cache: &m.cache,
+		genUuid: m.genUuid,
+	}
+
 	// unmarshalling the raw oplog
 	var obj interface{}
 	err := json.Unmarshal([]byte(s.rawOplog), &obj)
@@ -62,22 +73,7 @@ func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 
 	// parsing the raw oplog
 	for _, r := range result {
-		err := s.setOperationType(r)
-		if err != nil {
-			fmt.Println(err)
-		}
-
-		err = s.setTableName(r)
-		if err != nil {
-			fmt.Println(err)
-		}
-
-		err = s.setKeysAndValues(r)
-		if err != nil {
-			fmt.Println(err)
-		}
-
-		err = s.save()
+		err = s.parse(r)
 		if err != nil {
 			fmt.Println(err)
 		}
@@ -143,24 +139,20 @@ func(s *MongoOplog) GetEquivalentSQL() (string, error) {
 	return strings.Join(s.query, ""), nil
 }
 
-func(s *MongoOplog) setOperationType(result map[string]interface{}) error {
+func(s *MongoOplog) parse(result map[string]interface{}) error {
 	if result["op"] == "i" || result["op"] == "u" || result["op"] == "d" {
 		s.op = result["op"].(string)
-		return nil
+	} else {
+		return fmt.Errorf("error: unsupported operation type %q", result["op"])
 	}
-	return fmt.Errorf("error: unsupported operation type %q", result["op"])
-}
 
-func(s *MongoOplog) setTableName(result map[string]interface{}) error {
     if result["ns"] != nil {
         s.dbName = strings.Split(result["ns"].(string), ".")[0]
 		s.tableName = strings.Split(result["ns"].(string), ".")[1]
-		return nil
-    }
-	return fmt.Errorf("error: ns key not found in the oplog: failed to set the table name")
-}
+    } else {
+		return fmt.Errorf("error: ns key not found in the oplog: failed to set the table name")
+	}
 
-func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) error {
     nestedMap, ok := result["o"].(map[string]interface{})
 	if !ok {
 		return fmt.Errorf("error: o key not found in the oplog: failed to set keys and values")
@@ -182,8 +174,8 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) error {
 	}
 
    	if s.op == "i" {	// on insert operation
-		s.keys = make([]string, 0, len(nestedMap))
-		s.vals = make([]string, 0, len(nestedMap))
+		keys := make([]string, 0, len(nestedMap))
+		vals := make([]string, 0, len(nestedMap))
 		
 		// extracts the insert key and values
 		for key, val := range nestedMap {
@@ -199,49 +191,10 @@ func(s *MongoOplog) setKeysAndValues(result map[string]interface{}) error {
 			}
 
 			// adding key and value for query generation
-			s.keys = append(s.keys, key)
-			s.vals = append(s.vals, s.convertValueToString(val))
-		}
-	} else if s.op == "u" {		// on update operation
-		nestedMap, ok = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
-		if !ok {
-			return fmt.Errorf("error: diff key not found in the oplog: failed to set keys and values")
+			keys = append(keys, key)
+			vals = append(vals, s.convertValueToString(val))
 		}
 
-		// extracts the update set key and value
-		if nestedMap["u"] != nil {
-			s.setMap = make(map[string]string)
-			for key, val := range nestedMap["u"].(map[string]interface{}) {
-				s.setMap[key] = s.convertValueToString(val)
-			}
-		}
-
-		// extracts the update unset key and value
-		if nestedMap["d"] != nil {
-			s.unsetMap = make(map[string]string)
-			for key, val := range nestedMap["d"].(map[string]interface{}) {
-				s.unsetMap[key] = s.convertValueToString(val)
-			}
-		}
-
-		// extracts the update condition
-		if result["o2"] != nil {
-			s.conditionMap = make(map[string]string)
-			for key, val := range result["o2"].(map[string]interface{}) {
-				s.conditionMap[key] = s.convertValueToString(val)
-			}
-		}
-	} else if s.op == "d" {		// on delete operation
-		s.conditionMap = make(map[string]string)
-		for key, val := range nestedMap {
-			s.conditionMap[key] = s.convertValueToString(val)
-		}
-	}
-	return nil
-}
-
-func(s *MongoOplog) save() error {
-	if s.op == "i" {
 		if !s.isSchemaCreated{
 			cols := s.getCreateTableValues(s.tableCols)
 
@@ -253,33 +206,69 @@ func(s *MongoOplog) save() error {
 			s.isSchemaCreated = true
 		}
 
-		if len(s.keys) != len(s.vals) {
+		if len(keys) != len(vals) {
 			return fmt.Errorf("error: keys and values length mismatch while inserting")
 		}
 
-		insertQuery := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s);", s.dbName, s.tableName, strings.Join(s.keys, ", "), strings.Join(s.vals, ", "))
+		insertQuery := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s);", s.dbName, s.tableName, strings.Join(keys, ", "), strings.Join(vals, ", "))
 		s.query = append(s.query, insertQuery)
-	} else if s.op == "u" {
-		updateClause := s.getUpdateClause()
+	} else if s.op == "u" {		// on update operation
+		nestedMap, ok = result["o"].(map[string]interface{})["diff"].(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("error: diff key not found in the oplog: failed to set keys and values")
+		}
+
+		// extracts the update set key and value
+		setMap := make(map[string]string)
+		if nestedMap["u"] != nil {
+			// s.setMap = make(map[string]string)
+			for key, val := range nestedMap["u"].(map[string]interface{}) {
+				setMap[key] = s.convertValueToString(val)
+			}
+		}
+
+		// extracts the update unset key and value
+		unsetMap := make(map[string]string)
+		if nestedMap["d"] != nil {
+			// s.unsetMap = make(map[string]string)
+			for key, val := range nestedMap["d"].(map[string]interface{}) {
+				unsetMap[key] = s.convertValueToString(val)
+			}
+		}
+
+		// extracts the update condition
+		conditionMap := make(map[string]string)
+		if result["o2"] != nil {
+			// s.conditionMap = make(map[string]string)
+			for key, val := range result["o2"].(map[string]interface{}) {
+				conditionMap[key] = s.convertValueToString(val)
+			}
+		}
+
+		updateClause := s.getUpdateClause(setMap, unsetMap)
 		if updateClause == "" {
 			return fmt.Errorf("error: update clause not found while updating")
 		}
 
-		conditionClause := s.getConditionClause()
+		conditionClause := s.getConditionClause(conditionMap)
 		if conditionClause == "" {
 			return fmt.Errorf("error: condition clause not found while updating")
 		}
 
 		s.query = append(s.query, fmt.Sprintf("UPDATE %s.%s SET %s WHERE %s;", s.dbName, s.tableName, updateClause, conditionClause))
-	} else if s.op == "d" {
-		conditionClause := s.getConditionClause()
+	} else if s.op == "d" {		// on delete operation
+		conditionMap := make(map[string]string)
+		for key, val := range nestedMap {
+			conditionMap[key] = s.convertValueToString(val)
+		}
+
+		conditionClause := s.getConditionClause(conditionMap)
 		if conditionClause == "" {
 			return fmt.Errorf("error: condition clause not found while deleting")
 		}
 
 		s.query = append(s.query, fmt.Sprintf("DELETE FROM %s.%s WHERE %s;", s.dbName, s.tableName, conditionClause))
 	}
-
 	return nil
 }
 
@@ -354,9 +343,9 @@ func(s *MongoOplog) getAlterTableStatement(key, val string) string {
 }
 
 // need to join with AND if multiple conditions are present
-func(s *MongoOplog) getConditionClause() string {
+func(s *MongoOplog) getConditionClause(conditionMap map[string]string) string {
 	var conditionClause string
-	for key, val := range s.conditionMap {
+	for key, val := range conditionMap {
 		conditionClause = fmt.Sprintf("%v = %v", key, val)
 	}
 
@@ -364,15 +353,15 @@ func(s *MongoOplog) getConditionClause() string {
 }
 
 // need to join with AND if multiple conditions are present
-func(s *MongoOplog) getUpdateClause() string {
+func(s *MongoOplog) getUpdateClause(setMap, unsetMap map[string]string) string {
 	var updateClause string
 
-	for key, val := range s.setMap {
+	for key, val := range setMap {
 		updateClause = fmt.Sprintf("%v = %v", key, val)
 	}
 
 	// unset operation value set to NULL according to problem statement
-	for key := range s.unsetMap {
+	for key := range unsetMap {
 		updateClause = fmt.Sprintf("%s = NULL", key)
 	}
 

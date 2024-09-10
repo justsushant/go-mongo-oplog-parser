@@ -6,9 +6,8 @@ import (
 	pgquery "github.com/pganalyze/pg_query_go/v5"
 )
 
-func NewMockMongoOplogParser(query string) *MongoOplog {
-	return &MongoOplog{
-		rawOplog: query,
+func NewMockMongoOplogParser() *MongoOplogParser {
+	return &MongoOplogParser{
 		genUuid: func() string {
 			return "14798c213f273a7ca2cf5174"
 		},
@@ -220,9 +219,9 @@ func TestMongoOplogParser(t *testing.T) {
 
 	for _, tc := range tt {
 		t.Run(tc.name, func(t *testing.T) {
-			m := NewMockMongoOplogParser(tc.input)
+			m := NewMockMongoOplogParser()
 			
-			got, err := m.GetEquivalentSQL()
+			got, err := m.GetEquivalentSQL(tc.input)
 			if err != nil {
 				t.Errorf("Error: %v", err)
 			}
